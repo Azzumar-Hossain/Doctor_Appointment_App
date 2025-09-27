@@ -17,11 +17,11 @@ class LoginResponse {
 
   factory LoginResponse.fromJson(Map<String, dynamic> json) {
     return LoginResponse(
-      status: json['status'],
+      status: json['status'] ?? false,
       token: json['token'] ?? "",
       message: json['message'],
-      companyId: json['companyId'] ?? 0,
-      userId: json['userId'] ?? 0,
+      companyId: json['company_id'] ?? 0, // ✅ fixed
+      userId: json['user_id'] ?? 0, // ✅ fixed
       isActive: json['is_active'] ?? false,
     );
   }

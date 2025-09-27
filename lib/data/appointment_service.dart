@@ -68,6 +68,9 @@ class AppointmentService {
         },
       );
 
+      print("📥 API Response Status: ${response.statusCode}");
+      print("📥 API Raw Response: ${response.data}");
+
       print("📥 Submit Appointment Response: ${response.data}");
 
       if (response.statusCode == 200) {

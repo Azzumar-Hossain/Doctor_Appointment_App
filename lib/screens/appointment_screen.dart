@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'package:demo_appointment/core/api_client.dart';
 import 'package:demo_appointment/data/auth_service.dart';
+import 'package:demo_appointment/models/location_models.dart';
+import 'package:demo_appointment/services/location_service.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
@@ -17,7 +19,8 @@ class _AppointmentScreenState extends State<AppointmentScreen> {
   final TextEditingController _nameController = TextEditingController();
   final TextEditingController _mobileController = TextEditingController();
   final TextEditingController _ageController = TextEditingController();
-  final TextEditingController _addressController = TextEditingController();
+  final TextEditingController _addressController =
+      TextEditingController(); // present_address details
   final TextEditingController _doctorController = TextEditingController();
   final TextEditingController _timeController = TextEditingController();
   final TextEditingController _doctorFeeController = TextEditingController();
@@ -26,7 +29,7 @@ class _AppointmentScreenState extends State<AppointmentScreen> {
   String patientType = "Self";
 
   List<dynamic> searchResults = [];
-  bool isLoading = false;
+  bool isLoading = false; // used for patient search and other small loads
 
   // Appointment-related fields
   DateTime? selectedDate;
@@ -38,6 +41,48 @@ class _AppointmentScreenState extends State<AppointmentScreen> {
 
   String selectedAppointmentType = "New";
   String selectedPaymentMethod = "Cash";
+
+  // --- Location state ---
+  bool loadingLocations = false;
+  bool submitting = false; // used for submit button state
+
+  List<Division> divisions = [];
+  Division? selectedDivision;
+  District? selectedDistrict;
+  Upazila? selectedUpazila;
+  Union? selectedUnion;
+
+  List<District> districts = [];
+  List<Upazila> upazilas = [];
+  List<Union> unions = [];
+
+  // --------------------------
+
+  @override
+  void initState() {
+    super.initState();
+    _loadDivisions();
+  }
+
+  // 🔹 Load all divisions (with nested district/upazila/union)
+  Future<void> _loadDivisions() async {
+    setState(() => loadingLocations = true);
+    try {
+      final data = await LocationService().fetchDivisions();
+      setState(() {
+        divisions = data;
+      });
+    } catch (e) {
+      debugPrint('Error loading locations: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("Failed to load location data")),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => loadingLocations = false);
+    }
+  }
 
   // 🔹 Fetch patient list
   Future<void> fetchPatientList(String query) async {
@@ -66,7 +111,7 @@ class _AppointmentScreenState extends State<AppointmentScreen> {
       debugPrint("Error: $e");
       setState(() => searchResults = []);
     } finally {
-      setState(() => isLoading = false);
+      if (mounted) setState(() => isLoading = false);
     }
   }
 
@@ -152,27 +197,6 @@ class _AppointmentScreenState extends State<AppointmentScreen> {
   }
 
   // 🔹 Fetch Doctor's Fee
-  /*Future<void> fetchDoctorFee(int doctorId) async {
-    try {
-      final response = await http.get(
-        Uri.parse(
-          "http://20.20.20.37:8080/proyashospital/api/load-doctor-fees?id=$doctorId",
-        ),
-      );
-
-      if (response.statusCode == 200) {
-        final List data = jsonDecode(response.body);
-        if (data.isNotEmpty) {
-          setState(() {
-            _doctorFeeController.text = data.first['amount'] ?? "";
-          });
-        }
-      }
-    } catch (e) {
-      debugPrint("Error fetching doctor fee: $e");
-    }
-  }*/
-
   Future<void> fetchDoctorFee(int doctorId) async {
     try {
       final response = await http.get(
@@ -200,16 +224,24 @@ class _AppointmentScreenState extends State<AppointmentScreen> {
     }
   }
 
-  // 🔹 Submit appointment
+  // 🔹 Submit appointment (preserves your API style but improves logging & state)
   Future<void> submitAppointment() async {
     if (selectedDate == null ||
         selectedDoctor == null ||
         selectedTimeSlot == null) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Please select date, doctor, and time")),
+        const SnackBar(
+          content: Text("⚠️ Please select date, doctor, and time"),
+        ),
       );
       return;
     }
+
+    // set submitting state (for button)
+    if (mounted)
+      setState(() {
+        submitting = true;
+      });
 
     try {
       final formattedDate =
@@ -217,97 +249,139 @@ class _AppointmentScreenState extends State<AppointmentScreen> {
 
       // ✅ Get token
       final auth = AuthService();
-      final token = await auth.getToken();
+      var token = await auth.getToken();
+
+      // defensive: trim newline/space characters that sometimes sneak in
+      token = token?.trim();
 
       if (token == null || token.isEmpty) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("Session expired. Please login again.")),
-        );
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text("🔐 Session expired. Please login again."),
+            ),
+          );
+        }
         return;
       }
 
-      // ✅ Map fee data (from fetchDoctorFee)
-      final feeData = {
+      // ✅ Prepare request payload (we include both 'token' and 'api_token' to be safe)
+      final requestBody = {
+        "patient_type": patientType.toLowerCase(),
+        "name": _nameController.text,
+        "patient_id": "",
+        "mobile_number": _mobileController.text,
+        "patient_id_no": "",
+        "age": _ageController.text,
+        "age_parameter": "y",
+        "present_address": _addressController.text,
+        "division_id": selectedDivision?.id,
+        "district_id": selectedDistrict?.id,
+        "upazila_id": selectedUpazila?.id,
+        "union_id": selectedUnion?.id,
+        "sex": gender == "Male"
+            ? 1
+            : gender == "Female"
+            ? 2
+            : 3,
+        "date": formattedDate,
+        "doctor_id": selectedDoctor?['id'],
+        "schedule_id": selectedTimeSlot?['id'],
+        "time": "${selectedTimeSlot?['in_time']}",
+        "serial_num": 1,
+        "status": 1,
         "doctor_fee_id": selectedDoctor?['fee_id'] ?? 0,
         "doctor_fees_id": selectedDoctor?['fee_id'] ?? 0,
         "doctor_fee": _doctorFeeController.text,
+        "payable_amount": _doctorFeeController.text,
+        "payment_way_id": selectedPaymentMethod == "Cash"
+            ? 1
+            : selectedPaymentMethod == "Card"
+            ? 2
+            : 3,
+        "invoice_type": 0,
+        "account_id": 1,
+        // include both keys in case server expects either:
+        "token": token,
+        "api_token": token,
       };
 
+      // 📡 Debug logs
+      debugPrint("📤 Sending appointment request...");
+      debugPrint("🔑 Token (trimmed): $token");
+      debugPrint("📅 Date: $formattedDate");
+      debugPrint("📦 Payload: $requestBody");
+
+      // ✅ API Request (queryParameters because your API expects URL params)
       final response = await ApiClient.dio.post(
         "employee/online_appointment_store",
-        queryParameters: {
-          "patient_type": patientType.toLowerCase(),
-          "name": _nameController.text,
-          "patient_id": "",
-          "mobile_number": _mobileController.text,
-          "patient_id_no": "",
-          "age": _ageController.text,
-          "age_parameter": "y",
-          "present_address": _addressController.text,
-          "sex": gender == "Male"
-              ? 1
-              : gender == "Female"
-              ? 2
-              : 3,
-          "date": formattedDate,
-          "doctor_id": selectedDoctor?['id'],
-          "schedule_id": selectedTimeSlot?['id'],
-          "time": "${selectedTimeSlot?['in_time']}",
-          "serial_num": 1,
-          "status": 1,
-          "doctor_fee_id": feeData["doctor_fee_id"],
-          "doctor_fee": feeData["doctor_fee"],
-          "doctor_fees_id": feeData["doctor_fees_id"],
-          "payable_amount": feeData["doctor_fee"],
-          "payment_way_id": selectedPaymentMethod == "Cash"
-              ? 1
-              : selectedPaymentMethod == "Card"
-              ? 2
-              : 3,
-          "invoice_type": 0,
-          "account_id": 1,
-          "token": token, // 🔑 Injected token from secure storage
-        },
+        queryParameters: requestBody,
       );
 
-      debugPrint("📥 Submit Response: ${response.data}");
+      // helpful: show the actual request URL if available
+      try {
+        debugPrint("🔗 Request URL: ${response.realUri}");
+      } catch (_) {}
 
-      if (response.statusCode == 200 && response.data["status"] == "success") {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(response.data["message"] ?? "Appointment booked!"),
-            backgroundColor: Colors.green.shade700,
-            behavior: SnackBarBehavior.floating,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(12),
-            ),
-          ),
-        );
-        clearForm();
+      debugPrint("📥 Raw response: ${response.data}");
+
+      if (response.statusCode == 200) {
+        final data = response.data;
+
+        // Some endpoints return boolean true or string "success"
+        if (data["status"] == true || data["status"] == "success") {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                  data["message"] ?? "✅ Appointment booked successfully!",
+                ),
+                backgroundColor: Colors.green,
+              ),
+            );
+            clearForm();
+          }
+        } else {
+          // server returned a failure; print details to console
+          debugPrint("❌ Server rejected request: ${data["message"]}");
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                  "❌ Failed: ${data["message"] ?? "Unknown error"}",
+                ),
+                backgroundColor: Colors.red,
+              ),
+            );
+          }
+        }
       } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: const Text("❌ Failed to book appointment"),
-            backgroundColor: Colors.red.shade700,
-            behavior: SnackBarBehavior.floating,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(12),
+        debugPrint("❌ Unexpected status: ${response.statusCode}");
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text("⚠️ Server error: ${response.statusCode}"),
+              backgroundColor: Colors.red,
             ),
+          );
+        }
+      }
+    } catch (e, st) {
+      debugPrint("🔥 Exception while submitting appointment: $e");
+      debugPrint("📍 Stacktrace: $st");
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text("❌ Network error or unexpected issue."),
+            backgroundColor: Colors.red,
           ),
         );
       }
-    } catch (e) {
-      debugPrint("🔥 Submit Error: $e");
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: const Text("Error submitting appointment"),
-          backgroundColor: Colors.red.shade700,
-          behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
-          ),
-        ),
-      );
+    } finally {
+      if (mounted)
+        setState(() {
+          submitting = false;
+        });
     }
   }
 
@@ -331,6 +405,15 @@ class _AppointmentScreenState extends State<AppointmentScreen> {
       doctorList = [];
       timeSlots = [];
       selectedDate = null;
+
+      // location resets
+      selectedDivision = null;
+      selectedDistrict = null;
+      selectedUpazila = null;
+      selectedUnion = null;
+      districts = [];
+      upazilas = [];
+      unions = [];
     });
   }
 
@@ -361,16 +444,18 @@ class _AppointmentScreenState extends State<AppointmentScreen> {
 
     if (confirm == true) {
       clearForm();
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: const Text("Form cleared successfully!"),
-          backgroundColor: Colors.blue,
-          behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: const Text("Form cleared successfully!"),
+            backgroundColor: Colors.blue,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
           ),
-        ),
-      );
+        );
+      }
     }
   }
 
@@ -495,12 +580,135 @@ class _AppointmentScreenState extends State<AppointmentScreen> {
                       controller: _ageController,
                     ),
                     const SizedBox(height: 16),
-                    _buildModernTextField(
-                      "Address",
-                      Icons.location_on,
-                      maxLines: 2,
-                      controller: _addressController,
+
+                    // ====== NEW: Location dropdowns (Division -> District -> Upazila -> Union) ======
+                    // Division
+                    loadingLocations
+                        ? const SizedBox(
+                            width: double.infinity,
+                            child: Padding(
+                              padding: EdgeInsets.symmetric(vertical: 14),
+                              child: Center(child: CircularProgressIndicator()),
+                            ),
+                          )
+                        : _buildModernDropdown<Division>(
+                            "Division",
+                            Icons.location_city,
+                            value: selectedDivision,
+                            items: divisions
+                                .map(
+                                  (d) => DropdownMenuItem<Division>(
+                                    value: d,
+                                    child: Text(d.name),
+                                  ),
+                                )
+                                .toList(),
+                            onChanged: (Division? val) {
+                              setState(() {
+                                selectedDivision = val;
+                                selectedDistrict = null;
+                                selectedUpazila = null;
+                                selectedUnion = null;
+
+                                districts = val?.districts ?? [];
+                                upazilas = [];
+                                unions = [];
+                              });
+                            },
+                          ),
+
+                    const SizedBox(height: 12),
+
+                    // District
+                    _buildModernDropdown<District>(
+                      "District",
+                      Icons.domain,
+                      value: selectedDistrict,
+                      items: districts
+                          .map(
+                            (d) => DropdownMenuItem<District>(
+                              value: d,
+                              child: Text(d.name),
+                            ),
+                          )
+                          .toList(),
+                      onChanged: (District? val) {
+                        setState(() {
+                          selectedDistrict = val;
+                          selectedUpazila = null;
+                          selectedUnion = null;
+
+                          upazilas = val?.upazilas ?? [];
+                          unions = [];
+                        });
+                      },
                     ),
+
+                    const SizedBox(height: 12),
+
+                    // Upazila
+                    _buildModernDropdown<Upazila>(
+                      "Upazila",
+                      Icons.map,
+                      value: selectedUpazila,
+                      items: upazilas
+                          .map(
+                            (u) => DropdownMenuItem<Upazila>(
+                              value: u,
+                              child: Text(u.name),
+                            ),
+                          )
+                          .toList(),
+                      onChanged: (Upazila? val) {
+                        setState(() {
+                          selectedUpazila = val;
+                          selectedUnion = null;
+                          unions = val?.unions ?? [];
+                        });
+                      },
+                    ),
+
+                    const SizedBox(height: 12),
+
+                    // Union
+                    _buildModernDropdown<Union>(
+                      "Union",
+                      Icons.home_work,
+                      value: selectedUnion,
+                      items: unions
+                          .map(
+                            (u) => DropdownMenuItem<Union>(
+                              value: u,
+                              child: Text(u.name),
+                            ),
+                          )
+                          .toList(),
+                      onChanged: (Union? val) {
+                        setState(() {
+                          selectedUnion = val;
+                        });
+                      },
+                    ),
+
+                    const SizedBox(height: 12),
+
+                    // Detailed Address (present_address)
+                    TextField(
+                      controller: _addressController,
+                      maxLines: 2,
+                      decoration: InputDecoration(
+                        labelText: "Address (Road, House, etc.)",
+                        prefixIcon: const Icon(Icons.location_on),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        enabledBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          borderSide: BorderSide(color: Colors.grey.shade300),
+                        ),
+                      ),
+                    ),
+
                     const SizedBox(height: 16),
 
                     // Gender dropdown
@@ -753,7 +961,7 @@ class _AppointmentScreenState extends State<AppointmentScreen> {
                 // Submit Button
                 Expanded(
                   child: ElevatedButton(
-                    onPressed: submitAppointment,
+                    onPressed: submitting ? null : submitAppointment,
                     style: ElevatedButton.styleFrom(
                       backgroundColor: Colors.amber,
                       foregroundColor: Colors.black,
@@ -763,17 +971,26 @@ class _AppointmentScreenState extends State<AppointmentScreen> {
                       ),
                       elevation: 2,
                     ),
-                    child: const Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(Icons.check_circle, size: 20),
-                        SizedBox(width: 8),
-                        Text(
-                          "Confirm",
-                          style: TextStyle(fontWeight: FontWeight.bold),
-                        ),
-                      ],
-                    ),
+                    child: submitting
+                        ? const SizedBox(
+                            height: 24,
+                            width: 24,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2.5,
+                              color: Colors.white,
+                            ),
+                          )
+                        : const Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(Icons.check_circle, size: 20),
+                              SizedBox(width: 8),
+                              Text(
+                                "Confirm",
+                                style: TextStyle(fontWeight: FontWeight.bold),
+                              ),
+                            ],
+                          ),
                   ),
                 ),
               ],
